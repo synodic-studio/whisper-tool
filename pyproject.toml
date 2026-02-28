@@ -1,0 +1,15 @@
+[project]
+name = "whisper-tool"
+version = "0.1.0"
+description = "Local audio transcription CLI using faster-whisper"
+requires-python = ">=3.12"
+dependencies = [
+    "faster-whisper>=1.0.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project.scripts]
+transcribe = "whisper_tool.cli:main"
