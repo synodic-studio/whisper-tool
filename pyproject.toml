@@ -19,6 +19,7 @@ build-backend = "hatchling.build"
 
 [tool.uv]
 constraint-dependencies = [
+    "certifi>=2026.10.18",
     "filelock>=4.2.1",
     "setuptools>=84.1.0",
 ]
