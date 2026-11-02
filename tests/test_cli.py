@@ -20,10 +20,15 @@ def _build_parser():
 
     parser = argparse.ArgumentParser(
         prog="transcribe",
-        description="Transcribe audio files using faster-whisper (local, offline).",
+        description="Transcribe audio files using local, offline Whisper backends.",
     )
     parser.add_argument(
         "files", nargs="+", type=Path, help="Audio file(s) to transcribe"
+    )
+    parser.add_argument(
+        "--backend",
+        choices=("auto", "mlx", "faster-whisper"),
+        default="faster-whisper",
     )
     parser.add_argument(
         "--model",
@@ -33,9 +38,9 @@ def _build_parser():
     )
     parser.add_argument(
         "--compute-type",
-        default="int8",
-        choices=["int8", "float16", "float32"],
-        help="Compute type (default: int8)",
+        default="auto",
+        choices=["auto", "int8", "float16", "float32"],
+        help="Compute type",
     )
     parser.add_argument(
         "--json",
@@ -96,8 +101,9 @@ class TestArgumentParsing:
         parser = _build_parser()
         args = parser.parse_args(["recording.m4a"])
         assert args.files == [Path("recording.m4a")]
+        assert args.backend == "faster-whisper"
         assert args.model == "base"
-        assert args.compute_type == "int8"
+        assert args.compute_type == "auto"
         assert args.json_output is False
         assert args.words is False
         assert args.output_dir is None
@@ -119,6 +125,17 @@ class TestArgumentParsing:
             args = parser.parse_args(["f.m4a", "--model", model])
             assert args.model == model
 
+    def test_backend_choices(self):
+        parser = _build_parser()
+        for backend in ("auto", "mlx", "faster-whisper"):
+            args = parser.parse_args(["f.m4a", "--backend", backend])
+            assert args.backend == backend
+
+    def test_invalid_backend_rejected(self):
+        parser = _build_parser()
+        with pytest.raises(SystemExit):
+            parser.parse_args(["f.m4a", "--backend", "metal"])
+
     def test_invalid_model_rejected(self):
         parser = _build_parser()
         with pytest.raises(SystemExit):
@@ -126,7 +143,7 @@ class TestArgumentParsing:
 
     def test_compute_type_choices(self):
         parser = _build_parser()
-        for ct in ("int8", "float16", "float32"):
+        for ct in ("auto", "int8", "float16", "float32"):
             args = parser.parse_args(["f.m4a", "--compute-type", ct])
             assert args.compute_type == ct
 
@@ -196,6 +213,8 @@ class TestArgumentParsing:
                 "--words",
                 "--output-dir",
                 "./transcripts",
+                "--backend",
+                "mlx",
             ]
         )
         assert args.files == [Path("a.m4a"), Path("b.m4a")]
@@ -204,6 +223,7 @@ class TestArgumentParsing:
         assert args.json_output is True
         assert args.words is True
         assert args.output_dir == Path("./transcripts")
+        assert args.backend == "mlx"
 
 
 # ===================================================================
@@ -275,6 +295,8 @@ class TestPlainTextOutput:
                 "30",
                 "--independent-window-overlap-seconds",
                 "15",
+                "--backend",
+                "faster-whisper",
             ]
             from whisper_tool.cli import main
 
@@ -285,6 +307,7 @@ class TestPlainTextOutput:
         assert transcribe.call_args.kwargs["condition_on_previous_text"] is False
         assert transcribe.call_args.kwargs["independent_window_seconds"] == 30.0
         assert transcribe.call_args.kwargs["independent_window_overlap_seconds"] == 15.0
+        assert transcribe.call_args.kwargs["backend"] == "faster-whisper"
 
     def test_multiple_files_plain_text(self, capsys):
         """Multiple files print headers like '--- filename ---'."""
@@ -515,3 +538,25 @@ def test_independent_windows_reset_decoder_and_offset_timestamps(monkeypatch):
     assert len(calls) == 2
     assert all(options["initial_prompt"] == "Huécar" for _, options in calls)
     assert all(options["condition_on_previous_text"] is False for _, options in calls)
+
+
+def test_faster_whisper_auto_compute_preserves_int8_default(monkeypatch):
+    from whisper_tool import cli
+
+    constructor_calls = []
+
+    class FakeModel:
+        def transcribe(self, _audio, **_options):
+            info = SimpleNamespace(
+                language="en", language_probability=0.99, duration=1.0
+            )
+            return iter([]), info
+
+    def build_model(model_size, *, compute_type):
+        constructor_calls.append((model_size, compute_type))
+        return FakeModel()
+
+    monkeypatch.setattr(cli, "WhisperModel", build_model)
+    cli.transcribe_file(Path("audio.mp3"), model_size="base")
+
+    assert constructor_calls == [("base", "int8")]

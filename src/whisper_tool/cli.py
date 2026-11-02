@@ -1,30 +1,112 @@
-"""Local audio transcription CLI using faster-whisper."""
+"""Local audio transcription CLI with compatible faster-whisper and MLX backends."""
 
 import argparse
+import importlib.util
 import json
+import platform
 import sys
 import time
 from pathlib import Path
 
-from faster_whisper import WhisperModel
-from faster_whisper.audio import decode_audio
+# faster-whisper does not publish PEP 561 typing metadata.
+from faster_whisper import WhisperModel  # type: ignore[import-untyped]
+from faster_whisper.audio import decode_audio  # type: ignore[import-untyped]
 
 SAMPLE_RATE = 16_000
+BACKENDS = ("auto", "mlx", "faster-whisper")
+
+
+def _mlx_available() -> bool:
+    try:
+        return importlib.util.find_spec("mlx_whisper") is not None
+    except (ImportError, ValueError):
+        return False
+
+
+def select_backend(
+    requested: str,
+    *,
+    model_size: str,
+    hotwords: str | None,
+    system: str | None = None,
+    machine: str | None = None,
+    mlx_available: bool | None = None,
+) -> str:
+    """Resolve auto without changing the compatible explicit default."""
+    if requested not in BACKENDS:
+        raise ValueError(f"unsupported transcription backend: {requested}")
+    if requested != "auto":
+        return requested
+    if system is None:
+        system = platform.system()
+    if machine is None:
+        machine = platform.machine()
+    if mlx_available is None:
+        mlx_available = _mlx_available()
+    if (
+        system == "Darwin"
+        and machine == "arm64"
+        and model_size == "large-v3"
+        and hotwords is None
+        and mlx_available
+    ):
+        return "mlx"
+    return "faster-whisper"
 
 
 def transcribe_file(
     audio_path: Path,
     model_size: str = "base",
-    compute_type: str = "int8",
+    compute_type: str = "auto",
     word_timestamps: bool = False,
     initial_prompt: str | None = None,
     hotwords: str | None = None,
     condition_on_previous_text: bool = True,
     independent_window_seconds: float | None = None,
     independent_window_overlap_seconds: float = 0.0,
+    backend: str = "faster-whisper",
 ) -> dict:
     """Transcribe a single audio file. Returns dict with text, segments, and metadata."""
-    model = WhisperModel(model_size, compute_type=compute_type)
+    resolved_backend = select_backend(
+        backend,
+        model_size=model_size,
+        hotwords=hotwords,
+    )
+    if resolved_backend == "mlx":
+        if compute_type not in ("auto", "float16"):
+            raise ValueError(
+                "MLX backend requires --compute-type float16 (or the auto default)"
+            )
+        from whisper_tool.mlx_backend import transcribe_mlx
+
+        start = time.monotonic()
+        result = transcribe_mlx(
+            audio_path,
+            model_size=model_size,
+            word_timestamps=word_timestamps,
+            initial_prompt=initial_prompt,
+            hotwords=hotwords,
+            condition_on_previous_text=condition_on_previous_text,
+            independent_window_seconds=independent_window_seconds,
+            independent_window_overlap_seconds=independent_window_overlap_seconds,
+        )
+        return {
+            "file": str(audio_path),
+            "language": result["language"],
+            "language_probability": result["language_probability"],
+            "duration_seconds": result["duration_seconds"],
+            "text": result["text"],
+            "segments": result["segments"],
+            "transcription_binding": result["transcription_binding"],
+            "stats": {
+                "segment_count": len(result["segments"]),
+                "word_count": result["word_count"],
+                "transcription_ms": int((time.monotonic() - start) * 1000),
+            },
+        }
+
+    resolved_compute_type = "int8" if compute_type == "auto" else compute_type
+    model = WhisperModel(model_size, compute_type=resolved_compute_type)
     start = time.monotonic()
     segments = []
     full_text_parts = []
@@ -104,10 +186,16 @@ def transcribe_file(
 def main():
     parser = argparse.ArgumentParser(
         prog="transcribe",
-        description="Transcribe audio files using faster-whisper (local, offline).",
+        description="Transcribe audio files using local, offline Whisper backends.",
     )
     parser.add_argument(
         "files", nargs="+", type=Path, help="Audio file(s) to transcribe"
+    )
+    parser.add_argument(
+        "--backend",
+        choices=BACKENDS,
+        default="faster-whisper",
+        help="Inference backend (default: faster-whisper)",
     )
     parser.add_argument(
         "--model",
@@ -117,9 +205,9 @@ def main():
     )
     parser.add_argument(
         "--compute-type",
-        default="int8",
-        choices=["int8", "float16", "float32"],
-        help="Compute type (default: int8)",
+        default="auto",
+        choices=["auto", "int8", "float16", "float32"],
+        help="Compute type (default: int8 for faster-whisper, float16 for MLX)",
     )
     parser.add_argument(
         "--json",
@@ -205,6 +293,7 @@ def main():
             condition_on_previous_text=args.condition_on_previous_text,
             independent_window_seconds=args.independent_window_seconds,
             independent_window_overlap_seconds=args.independent_window_overlap_seconds,
+            backend=args.backend,
         )
         results.append(result)
 

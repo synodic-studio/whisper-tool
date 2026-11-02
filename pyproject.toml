@@ -1,10 +1,16 @@
 [project]
 name = "whisper-tool"
 version = "0.1.0"
-description = "Local audio transcription CLI using faster-whisper"
+description = "Local audio transcription CLI using faster-whisper or MLX Whisper"
 requires-python = ">=3.12"
 dependencies = [
     "faster-whisper>=1.0.0",
+]
+
+[project.optional-dependencies]
+mlx = [
+    "mlx==0.32.4; platform_system == 'Darwin' and platform_machine == 'arm64'",
+    "mlx-whisper==0.4.3; platform_system == 'Darwin' and platform_machine == 'arm64'",
 ]
 
 [build-system]
